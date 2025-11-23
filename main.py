@@ -1,62 +1,103 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, Form
+from fastapi.responses import HTMLResponse
 from supadata import Supadata
-import os
+import time
 
-app = FastAPI(title="Supadata Transcript API")
+# ⚠️ Hardcoded API Key — use only for local testing
+SUPADATA_API_KEY = "sd_0ae31fca72274fbc1482b0a4ff5a05ee"
 
-API_KEY = os.getenv("SUPADATA_API_KEY", "sd_0ae31fca72274fbc1482b0a4ff5a05ee")
-supadata = Supadata(api_key=API_KEY)
+supadata = Supadata(api_key=SUPADATA_API_KEY)
+app = FastAPI()
 
-class TranscriptRequest(BaseModel):
-    url: str
-    lang: str = "hi"
-    text: bool = True
-    mode: str = "auto"
 
-def extract_video_id(url: str) -> str:
-    if 'youtu.be' in url:
-        return url.split('/')[-1].split('?')[0]
-    elif 'youtube.com' in url and 'v=' in url:
-        return url.split('v=')[1].split('&')[0]
-    return url.split('/')[-1].split('?')[0]
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return """
+    <html>
+        <head>
+            <title>Supadata YouTube Transcript</title>
+        </head>
+        <body style="font-family: Arial; margin: 40px;">
+            <h1>Supadata YouTube Transcript</h1>
+            <form method="post" action="/">
+                <label for="url">Enter YouTube URL:</label><br><br>
+                <input type="text" id="url" name="url" style="width: 400px;" required />
+                <br><br>
+                <button type="submit">Get Transcript</button>
+            </form>
+        </body>
+    </html>
+    """
 
-@app.get("/")
-def read_root():
-    return {"message": "Supadata Transcript API", "status": "running"}
 
-@app.get("/health")
-def health_check():
-    return {"status": "healthy"}
-
-@app.post("/transcript")
-async def get_transcript(request: TranscriptRequest):
+@app.post("/", response_class=HTMLResponse)
+def get_transcript(url: str = Form(...)):
     try:
-        url_lower = request.url.lower()
-        
-        if 'youtube.com' in url_lower or 'youtu.be' in url_lower:
-            video_id = extract_video_id(request.url)
-            transcript = supadata.youtube.transcript(video_id=video_id, lang=request.lang, text=request.text)
-        else:
-            transcript = supadata.get_transcript(url=request.url, lang=request.lang, text=request.text, mode=request.mode)
-        
-        if hasattr(transcript, 'content'):
-            return {
-                "status": "success",
-                "language": getattr(transcript, 'lang', request.lang),
-                "content": transcript.content
-            }
-        else:
-            return {
-                "status": "processing",
-                "job_id": getattr(transcript, 'job_id', None),
-                "message": "Processing"
-            }
-    
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        raise HTTPException(status_code=500, detail={"status": "error", "message": str(e)})
+        transcript_result = supadata.transcript(
+            url=url,
+            lang="en",
+            text=True,
+            mode="auto"
+        )
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        status = "unknown"
+        content = ""
+
+        # If the response has a job_id → check status once
+        if hasattr(transcript_result, "job_id"):
+            result = supadata.transcript.get_job_status(transcript_result.job_id)
+            status = getattr(result, "status", "unknown")
+
+            if status == "completed":
+                content = getattr(result, "content", "")
+            else:
+                content = f"Job is not completed yet. Status: {status}"
+
+        else:
+            status = "completed"
+            content = str(transcript_result)
+
+        return f"""
+        <html>
+            <body style="font-family: Arial; margin: 40px;">
+                <h2>Transcript Result</h2>
+                <p><strong>Status:</strong> {status}</p>
+                <pre style="white-space: pre-wrap;">{content}</pre>
+                <a href="/">Back</a>
+            </body>
+        </html>
+        """
+
+    except Exception as e:
+        return f"""
+        <html>
+            <body style="font-family: Arial; margin: 40px;">
+                <h2>Error</h2>
+                <p>{str(e)}</p>
+                <a href="/">Back</a>
+            </body>
+        </html>
+        """
+
+
+# JSON API version
+@app.post("/api/transcript")
+def transcript_json(url: str):
+    try:
+        transcript_result = supadata.transcript(url=url, lang="en", text=True, mode="auto")
+
+        if hasattr(transcript_result, "job_id"):
+            result = supadata.transcript.get_job_status(transcript_result.job_id)
+            return {
+                "status": getattr(result, "status", "unknown"),
+                "content": getattr(result, "content", None),
+            }
+
+        return {
+            "status": "completed",
+            "content": str(transcript_result),
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
